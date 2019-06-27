@@ -1,0 +1,7 @@
+*.pyc
+*.nl
+*.mat
+*.in
+*.zip
+*.txt
+.idea/

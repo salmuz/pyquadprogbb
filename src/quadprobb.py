@@ -2,11 +2,36 @@ from cvxopt import solvers, matrix
 import numpy as np
 from numpy import linalg as la
 from numpy import inf
+from scipy.sparse import csr_matrix
 
 
-def scale(H, f, UB, idxU):
+# matlab method implemented in python
+# size((1, n)) -> np.size(n)
+
+def size(array, axis=0):
+    if array.ndim > 1:
+        return np.size(array, axis=axis)
+    return np.size(array)
+
+
+def length(array):
+    if array.ndim > 1:
+        n, p = array.shape
+        return n if n >= p else p
+    return np.size(array)
+
+
+# --------------------------------------------------------
+
+def cvxlpbnd(obj, A, lb, ub, lhs, rhs, cur):
+    pass
+
+
+def scale(H, f, A, Aeq, UB, idxU):
     # SCALE scales the part of UB indexed by 'idxU' to 1, assuming that LB(idxU)==0
+    m, _ = A.shape
     n, _ = H.shape
+    meq, _ = Aeq.shape
     if idxU.size > 0:
         idxUc = np.setdiff1d(np.arange(n), idxU)
         ub = UB[idxU]
@@ -14,14 +39,22 @@ def scale(H, f, UB, idxU):
         H[np.ix_(idxUc, idxU)] = H[np.ix_(idxUc, idxU)] @ np.diag(ub)
         H[np.ix_(idxU, idxUc)] = np.diag(ub) @ H[np.ix_(idxU, idxUc)]
         f[idxU] = np.multiply(ub, f[idxU])
+
+        if m > 0:
+            A[:, idxU] = A[:, idxU] @ np.diag(ub)
+        if meq > 0:
+            Aeq[:, idxU] = Aeq[:, idxU] @ np.diag(ub)
+
         UB[idxU] = 1
 
-    return H, f, UB
+    return H, A, Aeq, f, UB
 
 
-def shift(H, f, LB, UB, cons, idxL):
+def shift(H, f, A, b, Aeq, beq, LB, UB, cons, idxL):
     # SHIFT shifts L(idxL) to zero.
+    m, _ = A.shape
     n, _ = H.shape
+    meq, _ = Aeq.shape
     if idxL.size > 0:
         idxLc = np.setdiff1d(np.arange(n), idxL)
         lb = LB[idxL]
@@ -33,10 +66,16 @@ def shift(H, f, LB, UB, cons, idxL):
         # so add a check here
         if idxLc.size > 0:
             f[idxLc] = f[idxLc] + H[np.ix_(idxL, idxL)] @ lb
+
+        if m > 0:
+            b = b - A[:, idxL] * lb
+        if meq > 0:
+            beq = beq - Aeq[:, idxL] * lb
+
         UB[idxL] = UB[idxL] - lb
         LB[idxL] = 0
 
-    return f, LB, UB, cons
+    return f, b, beq, LB, UB, cons
 
 
 def checkinputs(H, LB, UB):
@@ -57,7 +96,174 @@ def checkinputs(H, LB, UB):
         raise Exception('Need UB >= LB.')
 
 
-def refm(H, f, LB, UB, cons, sstruct):
+def cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index, flag='b'):
+    """
+    % CPLEX_BND_SOLVE finds the lower and upper bounds for variables involved in the following feasible region:
+    %  { x | AA * x <= bb , LB <= x <= UB }
+    %
+    %  where the equality holds for those indices identified by INDEQ, ie, AA(INDEQ,:) * x == bb(INDEQ).
+    %
+    % Parameters:
+    %       - index: we only calculate bounds for x(index), not on the other compnents of x.
+    %       - flag: can take three values:
+    %               1) 'l': only lower bounds
+    %               2) 'u': only upper bounds
+    %               3) 'b': both lower and upper bounds, default
+    """
+    if index.size == 0:  # if numel(index) == 0 @matlab
+        xLB = np.array([])
+        xUB = np.array([])
+        # time = toc(tStart)
+        return xLB, xUB
+
+    # initilize data
+    n = length(LB)
+    meq = length(INDEQ)
+    mm = length(bb)
+    m = mm - meq
+    nn = length(index)
+
+    # set bound default values
+    if flag == 'l' or flag == 'b':
+        xLB = LB[index]
+    else:
+        xLB = np.array([])
+
+    if flag == 'u' or flag == 'b':
+        xUB = UB[index]
+    else:
+        xUB = np.array([])
+
+    # setup the first LP
+    # lhs = -inf(mm,1);
+    # lhs(INDEQ) = bb(INDEQ);
+    #
+    # ff = zeros(n,1); ff(index(1)) = 1;
+    #
+    # cplex = Cplex('lpbnd');
+    # cplex.DisplayFunc = [];
+    # cplex.Model.obj   = ff;
+    # cplex.Model.lb    = LB;
+    # cplex.Model.ub    = UB;
+    # cplex.Model.A     = AA;
+    # cplex.Model.lhs   = lhs;
+    # cplex.Model.rhs   = bb;
+    #
+    # % use primal dual method
+    # cplex.Param.lpmethod.Cur = 2;
+    #
+    #
+    # % solve first lower bound
+    # if strcmp(flag,'l')|strcmp(flag,'b')
+    #   cplex.Model.sense = 'minimize';
+    #   cplex.solve();
+    #   if  cplex.Solution.status ~= 1
+    #     fprintf('1st LP lower bound cannot be obtained: either unbounded or infeasible!\n\n');
+    #     error('CPLEX solution status = %d',cplex.Solution.status);
+    #   end
+    #   xx1 = cplex.Solution.x;
+    #   xLB(1) = ff'*xx1;
+    # end
+    #
+    # % solve first upper bound
+    # if strcmp(flag,'u')|strcmp(flag,'b')
+    #   cplex.Model.sense = 'maximize';
+    #   cplex.solve();
+    #
+    #   if  cplex.Solution.status ~= 1
+    #      fprintf('1st LP upper bound cannot be obtained: either unbounded or infeasible!\n\n');
+    #      error('CPLEX solution status = %d',cplex.Solution.status);
+    #   end
+    #   xx2 = cplex.Solution.x;
+    #   xUB(1) = ff'*xx2;
+    # end
+    #
+    # % find the indices of xx1 and xx2 are at its lower or upper bounds, no need to solve those LPs
+    # if strcmp(flag,'b')
+    #   tmp_L = min(xx1,xx2);
+    #   tmp_U = max(xx1,xx2);
+    # elseif strcmp(flag,'l')
+    #   tmp_L = xx1;
+    # else
+    #   tmp_U = xx2;
+    # end
+    #
+    # if strcmp(flag,'l')|strcmp(flag,'b')
+    #   tmp_L = tmp_L(index);
+    #   idx_L = find(abs(tmp_L - LB(index)) < 1e-8);
+    #   index_L = index;
+    #   index_L(idx_L) = 0;
+    # end
+    #
+    # if strcmp(flag,'u')|strcmp(flag,'b')
+    #   tmp_U = tmp_U(index);
+    #   idx_U = find(abs(tmp_U - UB(index)) < 1e-8);
+    #   index_U = index;
+    #   index_U(idx_U) = 0;
+    # end
+    #
+    # colstat = cplex.Solution.basis.colstat;
+    # rowstat = cplex.Solution.basis.rowstat;
+    #
+    # % use primal dual method
+    # cplex.Param.lpmethod.Cur = 1;
+    #
+    # % solve upper bounds
+    #
+    # if strcmp(flag,'b')|strcmp(flag,'u')
+    #   cplex.Model.sense = 'maximize';
+    #   for i = 2:nn
+    #     if index_U(i) > 0
+    #       ff = zeros(n,1);
+    #       ff(index_U(i)) = 1;
+    #       cplex.Model.obj = ff;
+    #       cplex.Start.basis.colstat = colstat;
+    #       cplex.Start.basis.rowstat = rowstat;
+    #       cplex.solve();
+    #       if cplex.Solution.status ~=  1
+    #         fprintf('%d-th LP upper bound cannot be obtained: either unbounded or infeasible!\n\n',i);
+    #         error('CPLEX solution status = %d',cplex.Solution.status);
+    #       end
+    #       xUB(i)= ff'*cplex.Solution.x;
+    #       colstat = cplex.Solution.basis.colstat;
+    #       rowstat = cplex.Solution.basis.rowstat;
+    #     end
+    #   end
+    # end
+    #
+    #
+    # % solve lower bounds
+    #
+    # if strcmp(flag,'b')|strcmp(flag,'l')
+    #
+    #   cplex.Model.sense = 'minimize';
+    #
+    #   for i = 2:nn
+    #     if index_L(i) > 0
+    #       ff = zeros(n,1);
+    #       ff(index_L(i)) = 1;
+    #       cplex.Model.obj = ff;
+    #       cplex.Start.basis.colstat = colstat;
+    #       cplex.Start.basis.rowstat = rowstat;
+    #       cplex.solve();
+    #
+    #       if cplex.Solution.status ~=  1
+    #         fprintf('%d-th LP lower bound cannot be obtained: either unbounded or infeasible!\n\n',i);
+    #         error('CPLEX solution status = %d',cplex.Solution.status);
+    #       end
+    #       xLB(i)= ff'*cplex.Solution.x;
+    #       colstat = cplex.Solution.basis.colstat;
+    #       rowstat = cplex.Solution.basis.rowstat;
+    #     end
+    #   end
+    # end
+    #
+    # time = toc(tStart);
+    # return
+    pass
+
+
+def refm(H, f, A, b, Aeq, beq, LB, UB, cons, sstruct):
     # REF1 perform the first reformulation in appendix of the paper
     n, _ = H.shape
     idxU = np.where(np.isinf(LB) & np.isfinite(UB))[0]
@@ -76,53 +282,89 @@ def refm(H, f, LB, UB, cons, sstruct):
         f[idxUc] = f(idxUc) + H(idxUc, idxU) * ub
         H[np.ix_(idxUc, idxU)] = - H[np.ix_(idxUc, idxU)]
         H[np.ix_(idxU, idxUc)] = - H[np.ix_(idxU, idxUc)]
+        # @salmuz not implemented yet
+        #   if m > 0
+        #     b = b - A(:,idxU)*ub;
+        #     A(:,idxU) = -A(:,idxU);
+        #   end
+        #   if meq > 0
+        #     beq = beq - Aeq(:,idxU)*ub;
+        #     Aeq(:,idxU) = - Aeq(:,idxU);
+        #   end
         LB[idxU] = 0
         UB[idxU] = inf
 
     # Shift the finite lower bounds to zero
-    idxL = np.where(np.isfinite(LB))[0]
+    idxL = np.where(np.isfinite(LB))[0]  # @salmuz, possible bug
     if idxL.size > 0:
         sstruct['idxL3'] = idxL
         sstruct['lb3'] = LB[idxL]
-        f, LB, UB, cons = shift(H, f, LB, UB, cons, idxL)
+        f, b, beq, LB, UB, cons = shift(H, f, A, b, Aeq, beq, LB, UB, cons, idxL)
 
     # Scale so that the upper bound is 1
-    idxU = np.where(np.isfinite(UB))[0]
+    idxU = np.where(np.isfinite(UB))[0]  # @salmuz, possible bug
     if idxU.size > 0:
         sstruct['idxU4'] = idxU
         sstruct['ub4'] = UB[idxU]
-        H, f, UB = scale(H, f, UB, idxU)
+        H, A, Aeq, f, UB = scale(H, f, A, Aeq, UB, idxU)
 
     # If not all the bounds are finite, then calculate bounds and turn it to [0,1]
+    m, _ = A.shape
+    meq, _ = Aeq.shape
     mLB = np.where(np.isfinite(LB))[0]
     mUB = np.where(np.isfinite(UB))[0]
     if mLB.size < n or mUB.size < n:
+
+        # @salmuz not implemented yet
+        #   AA = [ A; Aeq];
+        #   bb = [ b; beq];
+        #   if meq == 0
+        #       INDEQ = [];
+        #   else
+        #       INDEQ = m+1:m+meq;
+        #   end
+
         idxL = np.where(np.isinf(LB))[0]
         idxU = np.where(np.isinf(UB))[0]
         # In the case m + meq = 0, have to have finite bounds on LB and UB
         lp, = LB.shape
         up, = UB.shape
+        # @salmuz not implemented yet
+        # if m + meq > 0
+        #
+        #   %% If AA is empty, then feeding AA and bb to CPLEXINT will result
+        #   %% in error, and thus we only solve the following LPs when AA is not empty
+        #
+        #  [xL,xU,tlp] = cplex_bnd_solve(AA, bb, INDEQ, LB, UB, idxL,'l');
+        #  LB(idxL) = xL;
+        #  timeLP = timeLP + tlp;
+        #
+        #  [xL,xU,tlp] = cplex_bnd_solve(AA, bb, INDEQ, LB, UB, idxU,'u');
+        #  UB(idxU) = xU;
+        #  timeLP = timeLP + tlp;
+        # else
         if lp * up == 0 or (idxL.size + idxU.size) > 0:
             raise Exception('Both LB and UB must be finite.')
         # track change: 5
         sstruct['idxL5'] = idxL
         sstruct['lb5'] = LB[idxL]
-        f, LB, UB, cons = shift(H, f, LB, UB, cons, idxL)
+        f, b, beq, LB, UB, cons = shift(H, f, A, b, Aeq, beq, LB, UB, cons, idxL)
 
         sstruct['idxU5'] = idxU
         sstruct['ub5'] = UB[idxU]
-        H, f, UB = scale(H, f, UB, idxU)
+        H, f, A, Aeq, UB = scale(H, f, A, Aeq, UB, idxU)
 
         # We have calculated all the bounds and scaled them to [0,1]. But to have less complementarities,
         # we will pretend that we did not find bounds for the original unbounded values.
         LB[idxL] = -inf
         UB[idxU] = inf
 
-    return H, f, LB, UB, cons, sstruct
+    return H, f, A, b, Aeq, beq, LB, UB, cons, sstruct
 
 
-def boundall(H, f, LB, UB, idxL, idxB):
-    # BOUNDALL calculates the bounds for all the variables
+def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
+    """
+    BOUNDALL calculates the bounds for all the variables
     # -------------------------------------------------
     # Calculate bounds for all vars: ( x, s, lambda, y, wB, zB, zL, rB )
     # Solve the LP with variable X introduced to bound the dual vars
@@ -140,11 +382,15 @@ def boundall(H, f, LB, UB, idxL, idxB):
     #  - X: .5*n*(n+1)
     #
     # Order of vars: ( x, X, s, wB, lambda, y, zL, zB, rB )
-    # -------------------------------------------------
+    """
+    Aeq0 = Aeq.copy()
+    beq0 = beq.copy()
     n, _ = H.shape
+    m = np.size(A, 0)
+    meq = np.size(Aeq, 0)
     lenL = idxL.size
     lenB = idxB.size
-    nn = n + .5 * n * (n + 1) + lenL + 3 * lenB
+    nn = n + int(.5 * n * (n + 1)) + 2 * m + meq + lenL + 3 * lenB
 
     # BEGIN: prepare the data required by CPLEXINT
     dH = np.diag(H)
@@ -169,8 +415,8 @@ def boundall(H, f, LB, UB, idxL, idxB):
     tmp4 = np.zeros((lenB, n))
     for i in np.arange(lenB):
         k = idxB[i]
-        tmp4[k, i] = -1
-        
+        tmp4[k, i] = 1
+
     # -------------------------------------------------
     #  The KKT system now is:
     # 
@@ -180,20 +426,169 @@ def boundall(H, f, LB, UB, idxL, idxB):
     #  (4)    H \dot X + f' * x + b'*lambda + beq'*y + e' * rB = 0
     #  (5)    xB + wB = 1
     # -------------------------------------------------
-    # if ~isempty(Aeq)
-    #   Aeq = [ Aeq zeros(meq,nn-n)];  % (1) 
-    # end
+    if not np.all(Aeq == 0):  # if ~isempty(Aeq)
+        Aeq = np.concatenate([Aeq, np.zeros((meq, nn - n))], axis=1)
 
-    print(tmp1, tmp2, tmp3, tmp4)
+    # Aeq = [ Aeq ;
+    #        A    zeros(m,.5*n*(n+1)) eye(m) zeros(m,nn-n-m-.5*n*(n+1)) ;              % (2)
+    #        H    zeros(n,.5*n*(n+1)+m+lenB) A' Aeq0' tmp1 tmp2 tmp3 ;                 % (3)
+    #        f'  HH'  zeros(1,m+lenB) b' beq0' zeros(1,lenL+lenB) ones(1,lenB) ;       % (4)
+    #        tmp4 zeros(lenB,.5*n*(n+1)+m) eye(lenB) zeros(lenB,m+meq+lenL+2*lenB)  ]; % (5)
+
+    equ2 = np.array([])
+    equ3 = np.array([])
+    equ4 = np.array([])
+    equ5 = np.array([])
+
+    # % row2 of new Aeq: [ A   zeros(m,.5*n*(n+1)) eye(m) zeros(m,nn-n-m-.5*n*(n+1)) ]
+    if not np.all(A == 0):
+        equ2 = np.concatenate([A, np.zeros((m, int(.5 * n * (n + 1)))),
+                               np.eye(m), np.zeros((m, nn - n - m - .5 * n * (n + 1)))], axis=1)
+
+    # % row 3 of new Aeq : [ H    zeros(n,.5*n*(n+1)+m+lenB) A' Aeq0' tmp1 tmp2 tmp3 ]
+    equ3 = np.concatenate([H, np.zeros((n, int(.5 * n * (n + 1)) + m + lenB))], axis=1)
+    if not np.all(A == 0):
+        equ3 = np.concatenate([equ3, A.T], axis=1)
+    if not np.all(Aeq0 == 0):
+        equ3 = np.concatenate([equ3, Aeq0.T], axis=1)
+    if not np.all(tmp1 == 0):
+        equ3 = np.concatenate([equ3, tmp1], axis=1)
+    if not np.all(tmp2 == 0):
+        equ3 = np.concatenate([equ3, tmp2], axis=1)
+    if not np.all(tmp3 == 0):
+        equ3 = np.concatenate([equ3, tmp3], axis=1)
+
+    # % row 4 of new Aeq: [f'  HH'  zeros(1,m+lenB) b' beq0' zeros(1,lenL+lenB) ones(1,lenB) ]
+    equ4 = np.concatenate([f.T, HH.T])
+    if m + lenB > 0:
+        equ4 = np.concatenate([equ4, np.zeros(m + lenB)])
+    if not np.all(b == 0):
+        equ4 = np.concatenate([equ4, b.T])
+    if not np.all(beq0 == 0):
+        equ4 = np.concatenate([equ4, beq0.T])
+    if lenL + lenB > 0:
+        equ4 = np.concatenate([equ4, np.zeros(lenL + lenB)])
+    if lenB > 0:
+        equ4 = np.concatenate([equ4, np.ones(lenB)])
+
+    # row 5 of new Aeq: [ tmp4 zeros(lenB,.5*n*(n+1)+m) eye(lenB) zeros(lenB,m+meq+lenL+2*lenB) ]
+    if not np.all(tmp4):
+        equ5 = tmp4.copy()
+
+    if lenB > 0:
+        equ5 = np.concatenate([equ5, np.zeros((lenB, int(.5 * n * (n + 1)) + m)),
+                               np.eye(lenB), np.zeros((lenB, m + meq + lenL + 2 * lenB))], axis=1)
+    if np.all(Aeq == 0):
+        tmpp = np.array([size(equ2, 1), size(equ3, 1), size(equ4, 1), size(equ5, 1)])
+        Aeq = np.zeros((0, max(tmpp)))
+    if not np.all(equ2 == 0):
+        Aeq = np.concatenate([Aeq, equ2])
+    if not np.all(equ3 == 0):
+        Aeq = np.concatenate([Aeq, equ3])
+    if not np.all(equ4 == 0):
+        Aeq = np.concatenate([Aeq, [equ4]])
+    if not np.all(equ5 == 0):
+        Aeq = np.concatenate([Aeq, equ5])
+
+    beq = np.concatenate([beq, b, -f, [0], np.ones(lenB)])
+    INDEQ = np.arange(np.size(beq, 0)).T
+
+    # This process it for Aeq and A constraints (not our case) @salmuz
+    # ---------------------------------------------------------------
+    #  Start to prepare the part of data modeling implied bounds on X,
+    #  including three parts.
+    # ---------------------------------------------------------------
+
+    # Part I & II: X_{i,j} <= x_j, X_{i,j} <= x_i
+    len = int(n + .5 * n * (n + 1))
+    qq = np.ones((n, n))
+    qq = np.tril(qq)
+    (I, J) = np.where(qq)
+    lenI = I.size
+
+    block = np.zeros((1000, 3))
+    range_t = 1000
+    k, rowid = 0, 0
+    for i in np.arange(lenI):
+        ii = I[i]
+        jj = J[i]
+        block[k, :] = np.array([rowid, ii, -1])
+        k += 1
+        if k + 5 > range_t:
+            block = np.concatenate([block, np.zeros((1000, 3))])
+            range_t = range_t + 1000
+        block[k, :] = np.array([rowid, n + i, 1])
+        k += 1
+        rowid += 1
+        if ii != jj:
+            block[k, :] = np.array([rowid, n + i, 1])
+            k += 1
+            block[k, :] = np.array([rowid, jj, -1])
+            k += 1
+            rowid += 1
+
+    # %% Part III:  X_{i,j} >= x_i + x_j - 1
+    for i in np.arange(0, lenI):
+        ii = I[i]
+        jj = J[i]
+        block[k, :] = np.array([rowid, ii, 1])
+        k += 1
+        if k + 5 > range_t:
+            block = np.concatenate((block, np.zeros((1000, 3))))
+            range_t = range_t + 1000
+        if ii != jj:
+            block[k, :] = np.array([rowid, jj, 1])
+            k += 1
+        else:
+            block[k - 1, 2] = 2
+        block[k, :] = np.array([rowid, n + i, -1])
+        k += 1
+        rowid += 1
+    block = block[0:k, :]
+
+    # @salmuz verify index because matlab starts 1 and python 0
+    AA = csr_matrix((block[:, 2], (block[:, 0], block[:, 1])), (n * n + lenI, nn))
+    bb = np.concatenate([np.zeros(n ^ 2), np.ones(lenI)])
+    # Order of vars: ( x, X, s, wB, lambda, y, zL, zB, rB )
+    # s >=0, lambda >=0, y free, wB>=0, xL>=0, 0<=xB
+    # zL>=0, zB>=0,rB>=0
+    # s .* lambda = 0, xL.*zL=0, xB.*zB=0, wB.*rB=0, zB.*rB = 0
+    LB = np.zeros(nn)
+    tmp = int(len + 2 * m + lenB)
+    LB[tmp - 1: tmp + meq - 1] = -np.inf
+    UB = np.inf * np.ones(nn)
+    # In previous transformation, x is bounded above by 1, and so
+    # does X. although we pretend that they are not there when
+    # doing complementarity
+
+    UB[0: len] = 1
+    UB[len + m: len + m + lenB] = 1
+    # END: prepare the data required by CPLEXINT
+
+    # Recalculate bounds for x after adding KKT
+    L = np.zeros(nn)
+    U = np.ones(nn)
+    AA = np.concatenate([Aeq, AA.todense()])  # @salmuz bug
+    bb = np.concatenate([beq, bb])
+    total = n + nn - len
+
+    # calculate bounds for x
+    index0 = np.arange(n)
+    xL, xU, tlp = cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index0)
+    L[index0] = xL
+    U[index0] = xU
+    # timeLP = timeLP + tlp;
+
+    print(block, tmp2, tmp3, tmp4)
 
 
-def standardform(H, f, LB, UB, cons, tol):
+def standardform(H, f, A, b, Aeq, beq, LB, UB, cons, tol):
     sstruct = dict({'flag': 0, 'obj': -inf, 'fx1': [], 'fxval1': [], 'ub2': [], 'idxU2': [],
                     'lb3': [], 'idxL3': [], 'ub4': [], 'idxU4': [], 'idxU5': [], 'ub5': [],
                     'idxL5': [], 'lb5': [], 'lb6': [], 'ub6': [], 'xx': []})
 
     n, _ = H.shape
-    FX = np.where(abs(LB - UB) < tol)[0]
+    FX = np.where(abs(LB - UB) < tol)[0]  # @salmuz, possible bug
     if FX.size > 0:
         sstruct['fx1'] = FX
         sstruct['fxval1'] = LB[FX]
@@ -210,7 +605,17 @@ def standardform(H, f, LB, UB, cons, tol):
         LB = LB[FXc]
         UB = UB[FXc]
 
-    H, f, LB, UB, cons, sstruct = refm(H, f, LB, UB, cons, sstruct)
+    # %% @salmuz not implemented yet
+    # [tmp_m,tmp_n] = size(Aeq);
+    # tmp_m1 = rank(Aeq);
+    #
+    # if tmp_m1 < min(tmp_m,tmp_n)
+    #   tmp = [Aeq beq]';
+    #   [r, rowidx] = rref(tmp);
+    #   Aeq = Aeq(rowidx,:);
+    #   beq = beq(rowidx);
+    # end
+    H, f, A, b, Aeq, beq, LB, UB, cons, sstruct = refm(H, f, A, b, Aeq, beq, LB, UB, cons, sstruct)
 
     # ----------------------------------------------
     #  Now problem becomes:
@@ -224,6 +629,9 @@ def standardform(H, f, LB, UB, cons, tol):
     #  Now we are to formulate KKT system, and
     #  calculate bounds on all vars.
     # -----------------------------------------------
+    n, _ = H.shape
+    m, _ = A.shape
+    meq, _ = Aeq.shape
     i1 = np.isfinite(LB)
     i2 = np.isfinite(UB)
 
@@ -239,7 +647,7 @@ def standardform(H, f, LB, UB, cons, tol):
     # -----------------------------
     # Calculate bounds for all vars
     # -----------------------------
-    boundall(H, f, LB, UB, idxL, idxB)
+    L, U, tmp1, tmp2, tmp3, tmp4 = boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB)
 
 
 def quadprogbb(H, f, LB, UB, options=None):
@@ -256,8 +664,12 @@ def quadprogbb(H, f, LB, UB, options=None):
                 s.t.       LB <= x <= UB
 
     """
-    options = dict({"cons": 0, 'tol': 1e-8})
 
+    options = dict({"cons": 0, 'tol': 1e-8})
+    A = np.empty([0, 0])
+    b = np.array([])
+    Aeq = np.empty([0, 0])
+    beq = np.array([])
     assert type(H).__module__ == np.__name__, 'H must be a numpy array type.'
     n, m = H.shape
     assert n == m, 'H must be a square matrix.'
@@ -278,9 +690,33 @@ def quadprogbb(H, f, LB, UB, options=None):
     #  status: 0) solution found; 1) infeasible; 2) max_time exceeded
     # ======================================================
     stat = dict({'time_pre': 0, 'time_LP': 0, 'time_BB': 0, 'nodes': 0, 'status': []})
-    I = matrix(0.0, (p, p))
-    I[::p + 1] = 1
-    standardform(H, f, LB, UB, options['cons'], options['tol'])
+
+    # %% @salmuz not implemented yet
+    # %% check feasibility
+    # if (~isempty(A)) || (~isempty(Aeq))
+    #
+    #   cplexopts = cplexoptimset('Display','off');
+    #   [x,fval,exitflag,output] = cplexlp(zeros(n,1),A,b,Aeq,beq,LB,UB,[],cplexopts);
+    #   fprintf('\n==%f====\n', x);
+    #   if output.cplexstatus > 1
+    #
+    #     fprintf('\n\nFail assumption check:\n\n');
+    #     fprintf('CPLEX status of solving the feasibility problem: %s', output.cplexstatusstring);
+    #     x = []; fval = []; time = 0;
+    #     stat.status = 'inf_or_unb';
+    #     return
+    #   end
+    # end
+
+    # =========================================
+    # Turn problem into standard form
+    #
+    #  min   0.5*x'*H*x + f'*x
+    #  s.t.  A*x = b, x >= 0
+    #          [x*x']_E == 0
+    # Bounds x <= 1 are valid
+    # =========================================
+    standardform(H, f, A, b, Aeq, beq, LB, UB, options['cons'], options['tol'])
 
 
 """
