@@ -3,6 +3,13 @@ import numpy as np
 from numpy import linalg as la
 from numpy import inf
 from scipy.sparse import csr_matrix
+from cvxopt.solvers import lp
+from cvxopt import matrix
+
+import sys
+
+np.set_printoptions(threshold=sys.maxsize)
+np.set_printoptions(suppress=True)
 
 
 # matlab method implemented in python
@@ -23,8 +30,30 @@ def length(array):
 
 # --------------------------------------------------------
 
-def cvxlpbnd(obj, A, lb, ub, lhs, rhs, cur):
-    pass
+
+def cvxlpbnd(c, A, lb, ub, lhs, rhs, solver=None):
+    def remove_inf(bounds, constraints):
+        idx_inf = np.where(bounds == np.inf)
+        idx_minus_inf = np.where(bounds == -np.inf)
+        mask = np.ones(length(bounds), np.bool)
+        mask[idx_inf[0]] = 0
+        mask[idx_minus_inf[0]] = 0
+        return bounds[mask], constraints[mask]
+
+    d = size(c)
+    wrhs, wrA = remove_inf(rhs, A)
+    wlhs, wlA = remove_inf(-lhs, -A)
+    G_constraint = np.vstack([wrA, wlA])
+    h_constraint = np.hstack([wrhs, wlhs])
+
+    wub, wrI = remove_inf(ub, +np.eye(d))
+    wlb, wlI = remove_inf(-lb, -np.eye(d))
+    G_bound = np.vstack([wrI, wlI])
+    h_bound = np.hstack([wub, wlb])
+
+    G = matrix(np.vstack([G_constraint, G_bound]))
+    h = matrix(np.hstack([h_constraint, h_bound]))
+    return lp(matrix(c), G, h, solver=solver)
 
 
 def scale(H, f, A, Aeq, UB, idxU):
@@ -135,11 +164,11 @@ def cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index, flag='b'):
         xUB = np.array([])
 
     # setup the first LP
-    # lhs = -inf(mm,1);
-    # lhs(INDEQ) = bb(INDEQ);
-    #
-    # ff = zeros(n,1); ff(index(1)) = 1;
-    #
+    lhs = np.repeat(-np.inf, mm)  # -inf(mm, 1)
+    lhs[INDEQ] = bb[INDEQ]
+    ff = np.zeros(n)
+    ff[index[0]] = 1
+
     # cplex = Cplex('lpbnd');
     # cplex.DisplayFunc = [];
     # cplex.Model.obj   = ff;
@@ -148,37 +177,37 @@ def cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index, flag='b'):
     # cplex.Model.A     = AA;
     # cplex.Model.lhs   = lhs;
     # cplex.Model.rhs   = bb;
-    #
-    # % use primal dual method
+    # use primal dual method
     # cplex.Param.lpmethod.Cur = 2;
-    #
-    #
-    # % solve first lower bound
-    # if strcmp(flag,'l')|strcmp(flag,'b')
-    #   cplex.Model.sense = 'minimize';
-    #   cplex.solve();
-    #   if  cplex.Solution.status ~= 1
-    #     fprintf('1st LP lower bound cannot be obtained: either unbounded or infeasible!\n\n');
-    #     error('CPLEX solution status = %d',cplex.Solution.status);
-    #   end
-    #   xx1 = cplex.Solution.x;
-    #   xLB(1) = ff'*xx1;
-    # end
-    #
-    # % solve first upper bound
-    # if strcmp(flag,'u')|strcmp(flag,'b')
-    #   cplex.Model.sense = 'maximize';
-    #   cplex.solve();
-    #
-    #   if  cplex.Solution.status ~= 1
-    #      fprintf('1st LP upper bound cannot be obtained: either unbounded or infeasible!\n\n');
-    #      error('CPLEX solution status = %d',cplex.Solution.status);
-    #   end
-    #   xx2 = cplex.Solution.x;
-    #   xUB(1) = ff'*xx2;
-    # end
-    #
-    # % find the indices of xx1 and xx2 are at its lower or upper bounds, no need to solve those LPs
+
+    # solve first lower bound
+    if flag == 'l' or flag == 'b':
+        solution = cvxlpbnd(ff, AA, LB, UB, lhs, bb)
+        if solution['status'] != 'optimal':
+            print('1st LP lower bound cannot be obtained: either unbounded or infeasible!\n\n')
+            raise Exception("Not exist solution optimal!!")
+        xx1 = np.array(solution['x']).reshape((n,))
+        xLB[0] = ff.T @ xx1
+
+    # solve first upper bound
+    if flag == 'u' or flag == 'b':
+        solution = cvxlpbnd(-1 * ff, AA, LB, UB, lhs, bb)
+        if solution['status'] != 'optimal':
+            print('1st LP upper bound cannot be obtained: either unbounded or infeasible!\n\n')
+            raise Exception("Not exist solution optimal!!")
+        xx2 = np.array(solution['x']).reshape((n,))
+        xUB[0] = ff.T @ xx2
+
+    # find the indices of xx1 and xx2 are at its lower or upper bounds, no need to solve those LPs
+    if flag == 'b':
+        tmp_L = min(xx1, xx2)
+        tmp_U = max(xx1, xx2);
+    elif flag == 'l':
+        tmp_L = xx1
+    else:
+        tmp_U = xx2
+
+
     # if strcmp(flag,'b')
     #   tmp_L = min(xx1,xx2);
     #   tmp_U = max(xx1,xx2);
@@ -430,10 +459,10 @@ def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
         Aeq = np.concatenate([Aeq, np.zeros((meq, nn - n))], axis=1)
 
     # Aeq = [ Aeq ;
-    #        A    zeros(m,.5*n*(n+1)) eye(m) zeros(m,nn-n-m-.5*n*(n+1)) ;              % (2)
-    #        H    zeros(n,.5*n*(n+1)+m+lenB) A' Aeq0' tmp1 tmp2 tmp3 ;                 % (3)
-    #        f'  HH'  zeros(1,m+lenB) b' beq0' zeros(1,lenL+lenB) ones(1,lenB) ;       % (4)
-    #        tmp4 zeros(lenB,.5*n*(n+1)+m) eye(lenB) zeros(lenB,m+meq+lenL+2*lenB)  ]; % (5)
+    #    A    zeros(m,.5*n*(n+1)) eye(m) zeros(m,nn-n-m-.5*n*(n+1)) ;              % (2)
+    #    H    zeros(n,.5*n*(n+1)+m+lenB) A' Aeq0' tmp1 tmp2 tmp3 ;                 % (3)
+    #    f'  HH'  zeros(1,m+lenB) b' beq0' zeros(1,lenL+lenB) ones(1,lenB) ;       % (4)
+    #    tmp4 zeros(lenB,.5*n*(n+1)+m) eye(lenB) zeros(lenB,m+meq+lenL+2*lenB)  ]; % (5)
 
     equ2 = np.array([])
     equ3 = np.array([])
@@ -503,7 +532,10 @@ def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
     len = int(n + .5 * n * (n + 1))
     qq = np.ones((n, n))
     qq = np.tril(qq)
-    (I, J) = np.where(qq)
+    # matlab index recovery by column, numpy by row
+    _A = np.transpose(np.nonzero(qq))
+    _A = _A[_A[:, 1].argsort()]
+    I, J = _A[:, 0], _A[:, 1]
     lenI = I.size
 
     block = np.zeros((1000, 3))
@@ -528,7 +560,7 @@ def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
             rowid += 1
 
     # %% Part III:  X_{i,j} >= x_i + x_j - 1
-    for i in np.arange(0, lenI):
+    for i in np.arange(lenI):
         ii = I[i]
         jj = J[i]
         block[k, :] = np.array([rowid, ii, 1])
@@ -544,11 +576,13 @@ def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
         block[k, :] = np.array([rowid, n + i, -1])
         k += 1
         rowid += 1
+    print(block)
     block = block[0:k, :]
 
     # @salmuz verify index because matlab starts 1 and python 0
     AA = csr_matrix((block[:, 2], (block[:, 0], block[:, 1])), (n * n + lenI, nn))
-    bb = np.concatenate([np.zeros(n ^ 2), np.ones(lenI)])
+    print(AA)
+    bb = np.concatenate([np.zeros(n ** 2), np.ones(lenI)])
     # Order of vars: ( x, X, s, wB, lambda, y, zL, zB, rB )
     # s >=0, lambda >=0, y free, wB>=0, xL>=0, 0<=xB
     # zL>=0, zB>=0,rB>=0
@@ -568,18 +602,18 @@ def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
     # Recalculate bounds for x after adding KKT
     L = np.zeros(nn)
     U = np.ones(nn)
+
     AA = np.concatenate([Aeq, AA.todense()])  # @salmuz bug
     bb = np.concatenate([beq, bb])
     total = n + nn - len
 
     # calculate bounds for x
     index0 = np.arange(n)
-    xL, xU, tlp = cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index0)
-    L[index0] = xL
-    U[index0] = xU
+    cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index0)
+    # L[index0] = xL
+    # U[index0] = xU
     # timeLP = timeLP + tlp;
-
-    print(block, tmp2, tmp3, tmp4)
+    # print(block, tmp2, tmp3, tmp4)
 
 
 def standardform(H, f, A, b, Aeq, beq, LB, UB, cons, tol):
