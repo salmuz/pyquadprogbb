@@ -4,7 +4,9 @@ from numpy import linalg as la
 from numpy import inf
 from scipy.sparse import csr_matrix
 from cvxopt.solvers import lp
-from cvxopt import matrix
+from cvxopt import matrix, solvers
+
+solvers.options['show_progress'] = False
 
 import sys
 
@@ -169,17 +171,6 @@ def cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index, flag='b'):
     ff = np.zeros(n)
     ff[index[0]] = 1
 
-    # cplex = Cplex('lpbnd');
-    # cplex.DisplayFunc = [];
-    # cplex.Model.obj   = ff;
-    # cplex.Model.lb    = LB;
-    # cplex.Model.ub    = UB;
-    # cplex.Model.A     = AA;
-    # cplex.Model.lhs   = lhs;
-    # cplex.Model.rhs   = bb;
-    # use primal dual method
-    # cplex.Param.lpmethod.Cur = 2;
-
     # solve first lower bound
     if flag == 'l' or flag == 'b':
         solution = cvxlpbnd(ff, AA, LB, UB, lhs, bb)
@@ -200,96 +191,51 @@ def cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index, flag='b'):
 
     # find the indices of xx1 and xx2 are at its lower or upper bounds, no need to solve those LPs
     if flag == 'b':
-        tmp_L = min(xx1, xx2)
-        tmp_U = max(xx1, xx2);
+        tmp_L = np.minimum(xx1, xx2)
+        tmp_U = np.maximum(xx1, xx2)
     elif flag == 'l':
         tmp_L = xx1
     else:
         tmp_U = xx2
 
+    if flag == 'l' or flag == 'b':
+        tmp_L = tmp_L[index]
+        idx_L = np.where(np.absolute(tmp_L - LB[index]) < 1e-8)
+        index_L = np.copy(index)
+        index_L[idx_L] = -1
 
-    # if strcmp(flag,'b')
-    #   tmp_L = min(xx1,xx2);
-    #   tmp_U = max(xx1,xx2);
-    # elseif strcmp(flag,'l')
-    #   tmp_L = xx1;
-    # else
-    #   tmp_U = xx2;
-    # end
-    #
-    # if strcmp(flag,'l')|strcmp(flag,'b')
-    #   tmp_L = tmp_L(index);
-    #   idx_L = find(abs(tmp_L - LB(index)) < 1e-8);
-    #   index_L = index;
-    #   index_L(idx_L) = 0;
-    # end
-    #
-    # if strcmp(flag,'u')|strcmp(flag,'b')
-    #   tmp_U = tmp_U(index);
-    #   idx_U = find(abs(tmp_U - UB(index)) < 1e-8);
-    #   index_U = index;
-    #   index_U(idx_U) = 0;
-    # end
-    #
-    # colstat = cplex.Solution.basis.colstat;
-    # rowstat = cplex.Solution.basis.rowstat;
-    #
-    # % use primal dual method
-    # cplex.Param.lpmethod.Cur = 1;
-    #
-    # % solve upper bounds
-    #
-    # if strcmp(flag,'b')|strcmp(flag,'u')
-    #   cplex.Model.sense = 'maximize';
-    #   for i = 2:nn
-    #     if index_U(i) > 0
-    #       ff = zeros(n,1);
-    #       ff(index_U(i)) = 1;
-    #       cplex.Model.obj = ff;
-    #       cplex.Start.basis.colstat = colstat;
-    #       cplex.Start.basis.rowstat = rowstat;
-    #       cplex.solve();
-    #       if cplex.Solution.status ~=  1
-    #         fprintf('%d-th LP upper bound cannot be obtained: either unbounded or infeasible!\n\n',i);
-    #         error('CPLEX solution status = %d',cplex.Solution.status);
-    #       end
-    #       xUB(i)= ff'*cplex.Solution.x;
-    #       colstat = cplex.Solution.basis.colstat;
-    #       rowstat = cplex.Solution.basis.rowstat;
-    #     end
-    #   end
-    # end
-    #
-    #
-    # % solve lower bounds
-    #
-    # if strcmp(flag,'b')|strcmp(flag,'l')
-    #
-    #   cplex.Model.sense = 'minimize';
-    #
-    #   for i = 2:nn
-    #     if index_L(i) > 0
-    #       ff = zeros(n,1);
-    #       ff(index_L(i)) = 1;
-    #       cplex.Model.obj = ff;
-    #       cplex.Start.basis.colstat = colstat;
-    #       cplex.Start.basis.rowstat = rowstat;
-    #       cplex.solve();
-    #
-    #       if cplex.Solution.status ~=  1
-    #         fprintf('%d-th LP lower bound cannot be obtained: either unbounded or infeasible!\n\n',i);
-    #         error('CPLEX solution status = %d',cplex.Solution.status);
-    #       end
-    #       xLB(i)= ff'*cplex.Solution.x;
-    #       colstat = cplex.Solution.basis.colstat;
-    #       rowstat = cplex.Solution.basis.rowstat;
-    #     end
-    #   end
-    # end
-    #
-    # time = toc(tStart);
-    # return
-    pass
+    if flag == 'u' or flag == 'b':
+        tmp_U = tmp_U[index]
+        idx_U = np.where(np.absolute(tmp_U - UB[index]) < 1e-8)
+        index_U = np.copy(index)
+        index_U[idx_U] = -1
+
+    # solve upper bounds
+    if flag == 'u' or flag == 'b':
+        for i in range(1, nn):
+            if index_U[i] >= 0:
+                ff = np.zeros((n, 1))
+                ff[index_U[i]] = 1
+                solution = cvxlpbnd(-1 * ff, AA, LB, UB, lhs, bb)
+                if solution['status'] != 'optimal':
+                    print('%d-th LP upper bound cannot be obtained: either unbounded or infeasible!\n\n', i)
+                    raise Exception("Not exist solution optimal!!")
+                _xx = np.array(solution['x']).reshape((n,))
+                xUB[i] = ff.T @ _xx
+
+    if flag == 'l' or flag == 'b':
+        for i in range(1, nn):
+            if index_L[i] >= 0:
+                ff = np.zeros((n, 1))
+                ff[index_L[i]] = 1
+                solution = cvxlpbnd(ff, AA, LB, UB, lhs, bb)
+                if solution['status'] != 'optimal':
+                    print('%d-th LP lower bound cannot be obtained: either unbounded or infeasible!\n\n', i);
+                    raise Exception("Not exist solution optimal!!")
+                _xx = np.array(solution['x']).reshape((n,))
+                xLB[i] = ff.T @ _xx
+
+    return xLB, xUB
 
 
 def refm(H, f, A, b, Aeq, beq, LB, UB, cons, sstruct):
@@ -576,12 +522,11 @@ def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
         block[k, :] = np.array([rowid, n + i, -1])
         k += 1
         rowid += 1
-    print(block)
+
     block = block[0:k, :]
 
     # @salmuz verify index because matlab starts 1 and python 0
     AA = csr_matrix((block[:, 2], (block[:, 0], block[:, 1])), (n * n + lenI, nn))
-    print(AA)
     bb = np.concatenate([np.zeros(n ** 2), np.ones(lenI)])
     # Order of vars: ( x, X, s, wB, lambda, y, zL, zB, rB )
     # s >=0, lambda >=0, y free, wB>=0, xL>=0, 0<=xB
@@ -609,11 +554,30 @@ def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
 
     # calculate bounds for x
     index0 = np.arange(n)
-    cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index0)
-    # L[index0] = xL
-    # U[index0] = xU
-    # timeLP = timeLP + tlp;
-    # print(block, tmp2, tmp3, tmp4)
+    xL, xU = cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index0)
+    L[index0] = xL
+    U[index0] = xU
+
+    # Recalcualte bounds for the rest vars except X
+    index0 = np.arange(len, nn)
+    xL, xU = cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index0)
+    L[index0] = xL
+    U[index0] = xU
+
+    # --------------------------------------------
+    #  Formulate the KKT system, turn the problem
+    #  into one with A x == b, x >= 0 constraints
+    #  and x's upper bounds is one is implied.
+    #
+    #  The order of the variables are:
+    #  ( x, s, wB, lambda, y, zL, zB, rB)
+    # --------------------------------------------
+
+    # Formulating new A
+    L = np.hstack([L[0:n], L[len:]])
+    U = np.hstack([U[0:n], U[len:]])
+
+    return L, U, tmp1, tmp2, tmp3, tmp4
 
 
 def standardform(H, f, A, b, Aeq, beq, LB, UB, cons, tol):
@@ -682,6 +646,247 @@ def standardform(H, f, A, b, Aeq, beq, LB, UB, cons, tol):
     # Calculate bounds for all vars
     # -----------------------------
     L, U, tmp1, tmp2, tmp3, tmp4 = boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB)
+
+    # %% -------------------------------------------------
+    # %% Prep equality constraints: A * xx = b
+    # %%
+    # %%  (1)    H * x + A'*lambda + Aeq' * y - zL - zB + rB = -f
+    # %%  (2)    A * x + s = b
+    # %%  (3)    Aeq * x = beq
+    # %%  (4)    xB + wB = 1
+    # %% -------------------------------------------------
+    #
+    # if norm(L-U)<tol
+    #   sstruct.flag = 1;
+    #   xLB = L(1:n);
+    #   sstruct.xx = xLB;
+    #   sstruct.obj = .5*xLB'*H*xLB + f'*xLB+cons;
+    #   return
+    # end
+    #
+    # idxx = find(abs(U-L) <= tol);
+    # L(idxx) = U(idxx);
+    #
+    # nn = n+2*m+meq+lenL+3*lenB;
+    #
+    # H1 = H;
+    # A1 = A;
+    # A2 = A;
+    # Aeq1 = Aeq;
+    # Aeq2 = Aeq;
+    #
+    # xLB = L(1:n); xUB = U(1:n);
+    # Dx = diag(xUB-xLB);
+    #
+    # sLB = L(n+1:n+m); sUB = U(n+1:n+m);
+    #
+    # n0 = n+m;
+    # wLB = L(n0+1:n0+lenB); wUB = U(n0+1:n0+lenB);
+    #
+    # n0 = n0+lenB;
+    # lambdaLB = L(n0+1:n0+m); lambdaUB = U(n0+1:n0+m);
+    #
+    # n0 = n0+m;
+    # yLB = L(n0+1:n0+meq); yUB = U(n0+1:n0+meq);
+    #
+    # n0 = n0+meq;
+    # zLLB = L(n0+1:n0+lenL); zLUB = U(n0+1:n0+lenL);
+    #
+    # n0 = n0+lenL;
+    # zBLB = L(n0+1:n0+lenB); zBUB = U(n0+1:n0+lenB);
+    #
+    # n0 = n0 + lenB;
+    # rBLB = L(n0+1:end); rBUB = U(n0+1:end);
+    #
+    # %% -----------------
+    # %% Right-hand size b
+    # %% -----------------
+    #
+    # r1 = -f - H*xLB;
+    # if ~isempty(tmp1)
+    #   r1 = r1 - tmp1*zLLB;
+    # end
+    # if ~isempty(tmp2)
+    #   r1 = r1 - tmp2*zBLB;
+    # end
+    # if ~isempty(tmp3)
+    #   r1 = r1 - tmp3*rBLB;
+    # end
+    # if ~isempty(A1)
+    #   r1 = r1 - A1'*lambdaLB;
+    # end
+    # if ~isempty(Aeq1)
+    #   r1 = r1-Aeq1'*yLB;
+    # end
+    # if ~isempty(A)
+    #   r2 = b - A*xLB - sLB;
+    # else
+    #   r2 = [];
+    # end
+    # if ~isempty(Aeq2)
+    #   r3 = beq - Aeq2*xLB;
+    # else
+    #   r3 = [];
+    # end
+    # r4 = ones(lenB,1)- xLB(idxB)- wLB;
+    #
+    # b = [r1;r2;r3;r4];
+    #
+    # %% -----------------
+    # %% Left-hand side A
+    # %% -----------------
+    #
+    # tmp1 = tmp1*diag(zLUB - zLLB);
+    # tmp2 = tmp2*diag(zBUB - zBLB);
+    # tmp3 = tmp3*diag(rBUB - rBLB);
+    # row1 = [H*Dx zeros(n,m+lenB)];
+    # if ~isempty(A1)
+    #   row1 = [row1 A1'*diag(lambdaUB-lambdaLB)];
+    # end
+    # if ~isempty(Aeq1)
+    #   row1 = [row1 Aeq1'*diag(yUB-yLB)];
+    # end
+    # if ~isempty(A2)
+    #   row2 = A2*Dx;
+    # else
+    #   row2 = [];
+    # end
+    # if ~isempty(Aeq2)
+    #   row3 = Aeq2*Dx;
+    # else
+    #   row3 = [];
+    # end
+    # if ~isempty(tmp4)
+    #   row4 = tmp4*Dx;
+    # else
+    #   row4 = [];
+    # end
+    # %A = [ H*Dx zeros(n,m+lenB) A1'*diag(lambdaUB-lambdaLB) Aeq1'*diag(yUB-yLB) tmp1 tmp2 tmp3;
+    #
+    # %A = [ row1 tmp1 tmp2 tmp3;
+    # %      row2 diag(sUB-sLB) zeros(m,nn-n-m);
+    # %      row3 zeros(meq,nn-n);
+    # %      row4 zeros(lenB,m) diag(wUB-wLB) zeros(lenB, nn-n-m-lenB)];
+    #
+    # %row1 of A
+    # if ~isempty(tmp1)
+    #   row1 = [ row1 tmp1 ];
+    # end
+    # if ~isempty(tmp2)
+    #   row1 = [ row1 tmp2 ];
+    # end
+    # if ~isempty(tmp3)
+    #   row1 = [ row1 tmp3 ];
+    # end
+    #
+    # %row2 of A
+    # if ~isempty(sUB)
+    #   row2 = [ row2 diag(sUB-sLB) ];
+    # end
+    # if m * (nn-n-m) > 0
+    #   row2 = [ row2 zeros(m,nn-n-m) ];
+    # end
+    #
+    # % row3 of A
+    # if meq *(nn-n) > 0
+    #   row3 = [ row3 zeros(meq,nn-n) ];
+    # end
+    #
+    # % row4 of A
+    # if lenB * m > 0
+    #   row4 = [ row4 zeros(lenB,m)] ;
+    # end
+    # if ~isempty(wUB)
+    #   row4 = [ row4 diag(wUB - wLB) ];
+    # end
+    # if lenB * (nn-n-m-lenB) > 0
+    #   row4 = [ row4 zeros(lenB, nn-n-m-lenB) ];
+    # end
+    #
+    # A = [];
+    # if ~isempty(row1)
+    #   A  = row1;
+    # end
+    # if ~isempty(row2)
+    #   A = [ A; row2 ];
+    # end
+    # if ~isempty(row3)
+    #   A = [ A; row3 ];
+    # end
+    # if ~isempty(row4)
+    #   A = [ A; row4 ];
+    # end
+    #
+    # %% ------------------------------
+    # %% Shift and scale x affects objs
+    # %% ------------------------------
+    #
+    # cons = cons + 0.5*xLB'*H*xLB + f'*xLB;
+    # f = f + H*xLB;
+    #
+    # H = diag(xUB - xLB)*H*diag(xUB - xLB);
+    # f = (xUB-xLB).* f;
+    # n0 = nn-n;
+    # f = [f ; zeros(n0,1)];
+    # H = [H zeros(n,n0);
+    #      zeros(n0,n) zeros(n0)];
+    #
+    #
+    # %% track change: 6
+    # sstruct.lb6 = xLB;
+    # sstruct.ub6 = xUB;
+    #
+    #
+    # L = zeros(nn,1);
+    # U = ones(nn,1);
+    #
+    # %% ------------------------------
+    # %% Prep complementarity
+    # %% ------------------------------
+    #
+    # E = zeros(nn);
+    #
+    # %% s .* lambda = 0
+    # n0 = n+m+lenB;
+    # for i = 1:m
+    #     E(n+i, n0+i ) = 1;
+    # end
+    #
+    # %% xL .* zL = 0
+    # n0 = n0+m+meq;
+    # for k=1:lenL
+    #   i = idxL(k);
+    #   E(i,n0+k) = 1;
+    # end
+    #
+    # %% xB .* zB = 0
+    # n0 = nn - 2*lenB;
+    # for k=1:lenB
+    #   i = idxB(k);
+    #   E(i,n0+k) = 1;
+    # end
+    #
+    # %% wB .* rB = 0
+    #
+    # n00 = n+m; n0 = nn-lenB;
+    # for k = 1:lenB
+    #   E(n00+k,n0+k) = 1;
+    # end
+    #
+    # %% zB .* rB = 0
+    # n00 = nn - 2*lenB;
+    # for k = 1:lenB
+    #   E(n00+k,n0+k) = 1;
+    # end
+    #
+    # E = E + E';
+    #
+    # sstruct.cmp1 = [ n+(1:m)'; idxL ; idxB; n+m+(1:lenB)'];
+    # sstruct.cmp2 = [ n+m+lenB+(1:m)'; nn-2*lenB-lenL+(1:lenL)'; nn-2*lenB+(1:lenB)'; nn-lenB+(1:lenB)'];
+    # sstruct.lenB = lenB;
+    # sstruct.m = m;
+    # sstruct.n = n;
+    # sstruct.lenL = lenL;
 
 
 def quadprogbb(H, f, LB, UB, options=None):
