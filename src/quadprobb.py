@@ -1,20 +1,16 @@
-from cvxopt import solvers, matrix
-import numpy as np
+import sys, numpy as np
+from time import time
 from numpy import linalg as la
-from numpy import inf
 from scipy.sparse import csr_matrix
 from cvxopt.solvers import lp
 from cvxopt import matrix, solvers
 
 solvers.options['show_progress'] = False
-
-import sys
-
 np.set_printoptions(threshold=sys.maxsize)
 np.set_printoptions(suppress=True)
 
 
-# matlab method implemented in python
+# [START] matlab method implemented in python
 # size((1, n)) -> np.size(n)
 
 def size(array, axis=0):
@@ -34,9 +30,7 @@ def isempty(array):
     return np.size(array) == 0 or np.all(array == 0)
 
 
-# --------------------------------------------------------
-
-
+# [END] matlab methods end
 def cvxlpbnd(c, A, lb, ub, lhs, rhs, solver=None):
     def remove_inf(bounds, constraints):
         idx_inf = np.where(bounds == np.inf)
@@ -271,7 +265,7 @@ def refm(H, f, A, b, Aeq, beq, LB, UB, cons, sstruct):
         #     Aeq(:,idxU) = - Aeq(:,idxU);
         #   end
         LB[idxU] = 0
-        UB[idxU] = inf
+        UB[idxU] = np.inf
 
     # Shift the finite lower bounds to zero
     idxL = np.where(np.isfinite(LB))[0]  # @salmuz, possible bug
@@ -335,13 +329,12 @@ def refm(H, f, A, b, Aeq, beq, LB, UB, cons, sstruct):
 
         # We have calculated all the bounds and scaled them to [0,1]. But to have less complementarities,
         # we will pretend that we did not find bounds for the original unbounded values.
-        LB[idxL] = -inf
-        UB[idxU] = inf
+        LB[idxL] = -np.inf
+        UB[idxU] = np.inf
 
     return H, f, A, b, Aeq, beq, LB, UB, cons, sstruct
 
 
-# noinspection PyUnusedLocal
 def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
     """
     BOUNDALL calculates the bounds for all the variables
@@ -587,9 +580,10 @@ def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
 
 def standardform(H, f, A, b, Aeq, beq, LB, UB, cons, tol):
     E = np.array([])
-    sstruct = dict({'flag': 0, 'obj': -inf, 'fx1': [], 'fxval1': [], 'ub2': [], 'idxU2': [],
-                    'lb3': [], 'idxL3': [], 'ub4': [], 'idxU4': [], 'idxU5': [], 'ub5': [],
-                    'idxL5': [], 'lb5': [], 'lb6': [], 'ub6': [], 'xx': []})
+    sstruct = dict({'flag': 0, 'obj': -np.inf, 'fx1': np.array([]), 'fxval1': np.array([]), 'ub2': np.array([]),
+                    'idxU2': np.array([]), 'lb3': np.array([]), 'idxL3': np.array([]), 'ub4': np.array([]),
+                    'idxU4': np.array([]), 'idxU5': np.array([]), 'ub5': np.array([]), 'idxL5': np.array([]),
+                    'lb5': np.array([]), 'lb6': np.array([]), 'ub6': np.array([]), 'xx': np.array([])})
 
     n, _ = H.shape
     FX = np.where(abs(LB - UB) < tol)[0]  # @salmuz, possible bug
@@ -888,6 +882,43 @@ def standardform(H, f, A, b, Aeq, beq, LB, UB, cons, tol):
     return H, f, A, b, E, cons, L, U, sstruct
 
 
+def getsol(x, sstruct):
+    # it reverse the transformation made, and return the solution to the original problem
+    if not isempty(x):
+        x = x[0:sstruct["n"]]
+    else:
+        x = sstruct["xx"]
+        if isempty(x):
+            x = x[0:sstruct["n"]]
+
+    if sstruct.flag == 0:
+        x = (sstruct["ub6"] - sstruct["lb6"]) * x + sstruct["lb6"]
+
+    if not isempty(sstruct["idxU5"]):
+        x[sstruct["idxU5"]] = sstruct["ub5"] * x[sstruct["idxU5"]]
+
+    if not isempty(sstruct["idxL5"]):
+        x[sstruct["idxL5"]] = x[sstruct["idxL5"]] + sstruct["lb5"]
+
+    if not isempty(sstruct["idxU4"]):
+        x[sstruct["idxU4"]] = sstruct["ub4"] * x[sstruct["idxU4"]]
+
+    if not isempty(sstruct["idxL3"]):
+        x[sstruct["idxL3"]] = x[sstruct["idxL3"]] + sstruct["lb3"]
+
+    if not isempty(sstruct["idxU2"]):
+        x[sstruct["idxU2"]] = sstruct["ub2"] - x[sstruct["idxU2"]]
+
+    if not isempty(sstruct["fx1"]):
+        lenn = length(sstruct["fx1"]) + length(x)
+        y = np.zeros(lenn)
+        y[sstruct["fx1"]] = sstruct["fxval1"]
+        y[np.setdiff1d(np.arange(lenn), sstruct["fx1"])] = x
+        x = y
+
+    return x
+
+
 def quadprogbb(H, f, LB, UB, options=None):
     """
     This method use a solver implemented in matlab in
@@ -901,7 +932,6 @@ def quadprogbb(H, f, LB, UB, options=None):
             min      1/2*x'*H*x + f'*x
             s.t.       LB <= x <= UB
     """
-
     options = dict({"cons": 0, 'tol': 1e-8})
     A = np.empty([0, 0])
     b = np.array([])
@@ -954,30 +984,80 @@ def quadprogbb(H, f, LB, UB, options=None):
     # Bounds x <= 1 are valid
     # =========================================
     H, f, A, b, E, cons, L, U, sstruct = standardform(H, f, A, b, Aeq, beq, LB, UB, options['cons'], options['tol'])
+    print('\n****  Pre-Processing is complete, time = %.2f  ****\n')
 
+    # stat.time_pre = toc
+    # stat.time_LP = timeLP
 
-"""
+    if sstruct["flag"] == 1:
+        fval = sstruct.obj
+        x = getsol([], sstruct)
+        toc = time()
+        nodes_solved = 0
+        print('=========================== Node 0 ============================\n\n')
+        print('FINAL STATUS 1: optimal value = %.8e\n', fval)
+        print('FINAL STATUS 2: (created,solved,pruned,infeas,left) = (%d,%d,%d,%d,%d)\n', 0, 0, 0, 0, 0)
+        print('FINAL STATUS 3: solved = fully + fathomed + poorly : %d = %d + %d + %d\n', 0, 0, 0, 0)
+        print('FINAL STATUS 4: time = %d\n', toc)
+        stat["status"] = 'opt_soln'
+        return x, fval
 
-
-stat = struct('time_pre',0,'time_LP',0,'time_BB',0,'nodes',0,'status',[]);
-
-
- check feasibility 
-
-if (~isempty(A)) || (~isempty(Aeq))
-  
-  cplexopts = cplexoptimset('Display','off');
-  [x,fval,exitflag,output] = cplexlp(zeros(n,1),A,b,Aeq,beq,LB,UB,[],cplexopts);
-  
-  if output.cplexstatus > 1
-
-    fprintf('\n\nFail assumption check:\n\n');
-    fprintf('CPLEX status of solving the feasibility problem: %s', output.cplexstatusstring);
-    x = []; fval = []; time = 0;
-    stat.status = 'inf_or_unb';
-    return
-
-  end
-
-end
-"""
+    # cmp1 = sstruct.cmp1;
+    # cmp2 = sstruct.cmp2;
+    # lenB = sstruct.lenB;
+    # lenL = sstruct.lenL;
+    # m = sstruct.m;
+    # n = sstruct.n;
+    #
+    # m0 = length(cmp1);
+    #
+    # Fx = find(abs(L(cmp1)-U(cmp1))<options.tol & abs(L(cmp1)-0)<options.tol);
+    # Fz = find(abs(L(cmp2)-U(cmp2))<options.tol & abs(L(cmp2)-0)<options.tol);
+    #
+    # %% Setup constants for passage into opt_dnn subroutine
+    #
+    # %% Constant n saved above
+    #
+    # bign = size(A,2);
+    #
+    # %% Assign fixed values to lower and upper bounds
+    #
+    # L_save = L; % Subproblems will only differ in L and U
+    # U_save = U;
+    #
+    # B = [];
+    #
+    # %% -------------------------
+    # %% Initialize B&B structures
+    # %% -------------------------
+    #
+    # LBLB = -Inf;
+    # FxFx{1} = Fx;
+    # FzFz{1} = Fz;
+    # SS = zeros((1+bign)^2,1);
+    # SIGSIG = -1; % Signal that we want default sig in aug Lag algorithm
+    #
+    # %% ------------------------------------------------------------------
+    # %% Calculate first global upper bound and associated fathoming target
+    # %% ------------------------------------------------------------------
+    #
+    # if options.use_quadprog
+    #   quadopts = optimset('LargeScale','off','Display','off','Algorithm','interior-point-convex');
+    #   [xx,gUB] = quadprog(H,f,[],[],A,b,L_save,U_save,[],quadopts);
+    # else
+    #   xx = [];
+    #   gUB = Inf;
+    # end
+    #
+    # if gUB == Inf
+    #   LB_target = Inf;
+    # else
+    #   LB_target = gUB - options.fathom_tol*max(1,abs(gUB));
+    # end
+    # LB_beat = -Inf;
+    #
+    # %% ----------------------
+    # %% ----------------------
+    # %% Begin BRANCH-AND-BOUND
+    # %% ----------------------
+    # %% ----------------------
