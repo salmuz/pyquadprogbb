@@ -30,6 +30,10 @@ def length(array):
     return np.size(array)
 
 
+def isempty(array):
+    return np.size(array) == 0 or np.all(array == 0)
+
+
 # --------------------------------------------------------
 
 
@@ -147,7 +151,7 @@ def cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index, flag='b'):
         # time = toc(tStart)
         return xLB, xUB
 
-    # initilize data
+    # initialize data
     n = length(LB)
     meq = length(INDEQ)
     mm = length(bb)
@@ -337,6 +341,7 @@ def refm(H, f, A, b, Aeq, beq, LB, UB, cons, sstruct):
     return H, f, A, b, Aeq, beq, LB, UB, cons, sstruct
 
 
+# noinspection PyUnusedLocal
 def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
     """
     BOUNDALL calculates the bounds for all the variables
@@ -401,7 +406,7 @@ def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
     #  (4)    H \dot X + f' * x + b'*lambda + beq'*y + e' * rB = 0
     #  (5)    xB + wB = 1
     # -------------------------------------------------
-    if not np.all(Aeq == 0):  # if ~isempty(Aeq)
+    if not isempty(Aeq):  # if ~isempty(Aeq)
         Aeq = np.concatenate([Aeq, np.zeros((meq, nn - n))], axis=1)
 
     # Aeq = [ Aeq ;
@@ -559,7 +564,7 @@ def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
     U[index0] = xU
 
     # Recalcualte bounds for the rest vars except X
-    index0 = np.arange(len, nn)
+    index0 = np.arange(len, nn)  # matlab len+1:nn
     xL, xU = cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index0)
     L[index0] = xL
     U[index0] = xU
@@ -581,6 +586,7 @@ def boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB):
 
 
 def standardform(H, f, A, b, Aeq, beq, LB, UB, cons, tol):
+    E = np.array([])
     sstruct = dict({'flag': 0, 'obj': -inf, 'fx1': [], 'fxval1': [], 'ub2': [], 'idxU2': [],
                     'lb3': [], 'idxL3': [], 'ub4': [], 'idxU4': [], 'idxU5': [], 'ub5': [],
                     'idxL5': [], 'lb5': [], 'lb6': [], 'ub6': [], 'xx': []})
@@ -619,10 +625,10 @@ def standardform(H, f, A, b, Aeq, beq, LB, UB, cons, tol):
     #  Now problem becomes:
     #
     #    min  .5*x*H*x + f*x + cons
-    #    s.t.   A x <=  b              ( lamabda >=0 )
-    #           Aeq x = beq            ( y free )
-    #           0 <= xL                ( zL >=0 )
-    #           0 <= xB <= 1           ( zB>=0, rB >=0)
+    #    s.t.   A x <=  b       ( lamabda >=0 )
+    #           Aeq x = beq     ( y free )
+    #           0 <= xL         ( zL >=0 )
+    #           0 <= xB <= 1    ( zB>=0, rB >=0)
     #
     #  Now we are to formulate KKT system, and
     #  calculate bounds on all vars.
@@ -647,261 +653,253 @@ def standardform(H, f, A, b, Aeq, beq, LB, UB, cons, tol):
     # -----------------------------
     L, U, tmp1, tmp2, tmp3, tmp4 = boundall(H, f, A, b, Aeq, beq, LB, UB, idxL, idxB)
 
-    # %% -------------------------------------------------
-    # %% Prep equality constraints: A * xx = b
-    # %%
-    # %%  (1)    H * x + A'*lambda + Aeq' * y - zL - zB + rB = -f
-    # %%  (2)    A * x + s = b
-    # %%  (3)    Aeq * x = beq
-    # %%  (4)    xB + wB = 1
-    # %% -------------------------------------------------
+    # -------------------------------------------------
+    # Prep equality constraints: A * xx = b
+    # (1)    H * x + A'*lambda + Aeq' * y - zL - zB + rB = -f
+    # (2)    A * x + s = b
+    # (3)    Aeq * x = beq
+    # (4)    xB + wB = 1
+    # -------------------------------------------------
+
+    if la.norm(L - U) < tol:
+        sstruct["flag"] = 1
+        xLB = L[0:n]
+        sstruct["xx"] = xLB
+        sstruct["obj"] = .5 * (xLB.T @ H @ xLB) + f.T @ xLB + cons
+        return H, f, A, b, E, cons, L, U, sstruct
+
+    idxx = np.where(np.absolute(U - L) <= tol)
+    L[idxx] = U[idxx]
+
+    nn = n + 2 * m + meq + lenL + 3 * lenB
+    H1 = np.copy(H)
+    A1 = np.copy(A)
+    A2 = np.copy(A)
+    Aeq1 = np.copy(Aeq)
+    Aeq2 = np.copy(Aeq)
+
+    xLB = L[0:n]
+    xUB = U[0:n]
+    Dx = np.diag(xUB - xLB)
+
+    sLB = L[n:n + m]
+    sUB = U[n:n + m]
+
+    n0 = n + m
+    wLB = L[n0:n0 + lenB]
+    wUB = U[n0:n0 + lenB]
+
+    n0 = n0 + lenB
+    lambdaLB = L[n0:n0 + m]
+    lambdaUB = U[n0:n0 + m]
+
+    n0 = n0 + m
+    yLB = L[n0:n0 + meq]
+    yUB = U[n0:n0 + meq]
+
+    n0 = n0 + meq
+    zLLB = L[n0:n0 + lenL]
+    zLUB = U[n0:n0 + lenL]
+
+    n0 = n0 + lenL
+    zBLB = L[n0:n0 + lenB]
+    zBUB = U[n0:n0 + lenB]
+
+    n0 = n0 + lenB
+    rBLB = L[n0:]
+    rBUB = U[n0:]
+
+    # -----------------
+    # Right-hand size b
+    # -----------------
     #
-    # if norm(L-U)<tol
-    #   sstruct.flag = 1;
-    #   xLB = L(1:n);
-    #   sstruct.xx = xLB;
-    #   sstruct.obj = .5*xLB'*H*xLB + f'*xLB+cons;
-    #   return
-    # end
+    r1 = -1 * f - H @ xLB
+    if not isempty(tmp1):
+        r1 = r1 - tmp1 @ zLLB
+
+    if not isempty(tmp2):
+        r1 = r1 - tmp2 @ zBLB
+
+    if not isempty(tmp3):
+        r1 = r1 - tmp3 @ rBLB
+
+    if not isempty(A1):
+        r1 = r1 - A1.T @ lambdaLB
+
+    if not isempty(Aeq1):
+        r1 = r1 - Aeq1.T @ yLB
+
+    if not isempty(A):
+        r2 = b - A @ xLB - sLB
+    else:
+        r2 = np.array([])
+
+    if not isempty(Aeq2):
+        r3 = beq - Aeq2 @ xLB
+    else:
+        r3 = np.array([])
+
+    r4 = np.ones(lenB) - xLB[idxB] - wLB
+    b = np.hstack([r1, r2, r3, r4])
+
+    # -----------------
+    # Left-hand side A
+    # -----------------
+    tmp1 = tmp1 @ np.diag(zLUB - zLLB)
+    tmp2 = tmp2 @ np.diag(zBUB - zBLB)
+    tmp3 = tmp3 @ np.diag(rBUB - rBLB)
+    row1 = np.hstack([H @ Dx, np.zeros((n, m + lenB))])
+
+    if not isempty(A1):
+        row1 = np.hstack([row1, A1.T @ np.diag(lambdaUB - lambdaLB)])
+
+    if not isempty(Aeq1):
+        row1 = np.hstack([row1, Aeq1.T @ np.diag(yUB - yLB)])
+
+    if not isempty(A2):
+        row2 = A2 @ Dx
+    else:
+        row2 = np.array([])
+
+    if not isempty(Aeq2):
+        row3 = Aeq2 @ Dx
+    else:
+        row3 = []
+
+    if not isempty(tmp4):
+        row4 = tmp4 @ Dx
+    else:
+        row4 = []
+
+    # A = [ H*Dx zeros(n,m+lenB) A1'*diag(lambdaUB-lambdaLB) Aeq1'*diag(yUB-yLB) tmp1 tmp2 tmp3;
+    # A = [ row1 tmp1 tmp2 tmp3;
+    #       row2 diag(sUB-sLB) zeros(m,nn-n-m);
+    #       row3 zeros(meq,nn-n);
+    #       row4 zeros(lenB,m) diag(wUB-wLB) zeros(lenB, nn-n-m-lenB)];
     #
-    # idxx = find(abs(U-L) <= tol);
-    # L(idxx) = U(idxx);
-    #
-    # nn = n+2*m+meq+lenL+3*lenB;
-    #
-    # H1 = H;
-    # A1 = A;
-    # A2 = A;
-    # Aeq1 = Aeq;
-    # Aeq2 = Aeq;
-    #
-    # xLB = L(1:n); xUB = U(1:n);
-    # Dx = diag(xUB-xLB);
-    #
-    # sLB = L(n+1:n+m); sUB = U(n+1:n+m);
-    #
-    # n0 = n+m;
-    # wLB = L(n0+1:n0+lenB); wUB = U(n0+1:n0+lenB);
-    #
-    # n0 = n0+lenB;
-    # lambdaLB = L(n0+1:n0+m); lambdaUB = U(n0+1:n0+m);
-    #
-    # n0 = n0+m;
-    # yLB = L(n0+1:n0+meq); yUB = U(n0+1:n0+meq);
-    #
-    # n0 = n0+meq;
-    # zLLB = L(n0+1:n0+lenL); zLUB = U(n0+1:n0+lenL);
-    #
-    # n0 = n0+lenL;
-    # zBLB = L(n0+1:n0+lenB); zBUB = U(n0+1:n0+lenB);
-    #
-    # n0 = n0 + lenB;
-    # rBLB = L(n0+1:end); rBUB = U(n0+1:end);
-    #
-    # %% -----------------
-    # %% Right-hand size b
-    # %% -----------------
-    #
-    # r1 = -f - H*xLB;
-    # if ~isempty(tmp1)
-    #   r1 = r1 - tmp1*zLLB;
-    # end
-    # if ~isempty(tmp2)
-    #   r1 = r1 - tmp2*zBLB;
-    # end
-    # if ~isempty(tmp3)
-    #   r1 = r1 - tmp3*rBLB;
-    # end
-    # if ~isempty(A1)
-    #   r1 = r1 - A1'*lambdaLB;
-    # end
-    # if ~isempty(Aeq1)
-    #   r1 = r1-Aeq1'*yLB;
-    # end
-    # if ~isempty(A)
-    #   r2 = b - A*xLB - sLB;
-    # else
-    #   r2 = [];
-    # end
-    # if ~isempty(Aeq2)
-    #   r3 = beq - Aeq2*xLB;
-    # else
-    #   r3 = [];
-    # end
-    # r4 = ones(lenB,1)- xLB(idxB)- wLB;
-    #
-    # b = [r1;r2;r3;r4];
-    #
-    # %% -----------------
-    # %% Left-hand side A
-    # %% -----------------
-    #
-    # tmp1 = tmp1*diag(zLUB - zLLB);
-    # tmp2 = tmp2*diag(zBUB - zBLB);
-    # tmp3 = tmp3*diag(rBUB - rBLB);
-    # row1 = [H*Dx zeros(n,m+lenB)];
-    # if ~isempty(A1)
-    #   row1 = [row1 A1'*diag(lambdaUB-lambdaLB)];
-    # end
-    # if ~isempty(Aeq1)
-    #   row1 = [row1 Aeq1'*diag(yUB-yLB)];
-    # end
-    # if ~isempty(A2)
-    #   row2 = A2*Dx;
-    # else
-    #   row2 = [];
-    # end
-    # if ~isempty(Aeq2)
-    #   row3 = Aeq2*Dx;
-    # else
-    #   row3 = [];
-    # end
-    # if ~isempty(tmp4)
-    #   row4 = tmp4*Dx;
-    # else
-    #   row4 = [];
-    # end
-    # %A = [ H*Dx zeros(n,m+lenB) A1'*diag(lambdaUB-lambdaLB) Aeq1'*diag(yUB-yLB) tmp1 tmp2 tmp3;
-    #
-    # %A = [ row1 tmp1 tmp2 tmp3;
-    # %      row2 diag(sUB-sLB) zeros(m,nn-n-m);
-    # %      row3 zeros(meq,nn-n);
-    # %      row4 zeros(lenB,m) diag(wUB-wLB) zeros(lenB, nn-n-m-lenB)];
-    #
-    # %row1 of A
-    # if ~isempty(tmp1)
-    #   row1 = [ row1 tmp1 ];
-    # end
-    # if ~isempty(tmp2)
-    #   row1 = [ row1 tmp2 ];
-    # end
-    # if ~isempty(tmp3)
-    #   row1 = [ row1 tmp3 ];
-    # end
-    #
-    # %row2 of A
-    # if ~isempty(sUB)
-    #   row2 = [ row2 diag(sUB-sLB) ];
-    # end
-    # if m * (nn-n-m) > 0
-    #   row2 = [ row2 zeros(m,nn-n-m) ];
-    # end
-    #
-    # % row3 of A
-    # if meq *(nn-n) > 0
-    #   row3 = [ row3 zeros(meq,nn-n) ];
-    # end
-    #
-    # % row4 of A
-    # if lenB * m > 0
-    #   row4 = [ row4 zeros(lenB,m)] ;
-    # end
-    # if ~isempty(wUB)
-    #   row4 = [ row4 diag(wUB - wLB) ];
-    # end
-    # if lenB * (nn-n-m-lenB) > 0
-    #   row4 = [ row4 zeros(lenB, nn-n-m-lenB) ];
-    # end
-    #
-    # A = [];
-    # if ~isempty(row1)
-    #   A  = row1;
-    # end
-    # if ~isempty(row2)
-    #   A = [ A; row2 ];
-    # end
-    # if ~isempty(row3)
-    #   A = [ A; row3 ];
-    # end
-    # if ~isempty(row4)
-    #   A = [ A; row4 ];
-    # end
-    #
-    # %% ------------------------------
-    # %% Shift and scale x affects objs
-    # %% ------------------------------
-    #
-    # cons = cons + 0.5*xLB'*H*xLB + f'*xLB;
-    # f = f + H*xLB;
-    #
-    # H = diag(xUB - xLB)*H*diag(xUB - xLB);
-    # f = (xUB-xLB).* f;
-    # n0 = nn-n;
-    # f = [f ; zeros(n0,1)];
-    # H = [H zeros(n,n0);
-    #      zeros(n0,n) zeros(n0)];
-    #
-    #
-    # %% track change: 6
-    # sstruct.lb6 = xLB;
-    # sstruct.ub6 = xUB;
-    #
-    #
-    # L = zeros(nn,1);
-    # U = ones(nn,1);
-    #
-    # %% ------------------------------
-    # %% Prep complementarity
-    # %% ------------------------------
-    #
-    # E = zeros(nn);
-    #
-    # %% s .* lambda = 0
-    # n0 = n+m+lenB;
-    # for i = 1:m
-    #     E(n+i, n0+i ) = 1;
-    # end
-    #
-    # %% xL .* zL = 0
-    # n0 = n0+m+meq;
-    # for k=1:lenL
-    #   i = idxL(k);
-    #   E(i,n0+k) = 1;
-    # end
-    #
-    # %% xB .* zB = 0
-    # n0 = nn - 2*lenB;
-    # for k=1:lenB
-    #   i = idxB(k);
-    #   E(i,n0+k) = 1;
-    # end
-    #
-    # %% wB .* rB = 0
-    #
-    # n00 = n+m; n0 = nn-lenB;
-    # for k = 1:lenB
-    #   E(n00+k,n0+k) = 1;
-    # end
-    #
-    # %% zB .* rB = 0
-    # n00 = nn - 2*lenB;
-    # for k = 1:lenB
-    #   E(n00+k,n0+k) = 1;
-    # end
-    #
-    # E = E + E';
-    #
-    # sstruct.cmp1 = [ n+(1:m)'; idxL ; idxB; n+m+(1:lenB)'];
-    # sstruct.cmp2 = [ n+m+lenB+(1:m)'; nn-2*lenB-lenL+(1:lenL)'; nn-2*lenB+(1:lenB)'; nn-lenB+(1:lenB)'];
-    # sstruct.lenB = lenB;
-    # sstruct.m = m;
-    # sstruct.n = n;
-    # sstruct.lenL = lenL;
+    # row1 of A
+    if not isempty(tmp1):
+        row1 = np.hstack([row1, tmp1])
+
+    if not isempty(tmp2):
+        row1 = np.hstack([row1, tmp2])
+
+    if not isempty(tmp3):
+        row1 = np.hstack([row1, tmp3])
+
+    # row2 of A
+    if not isempty(sUB):
+        row2 = np.hstack([row2, np.diag(sUB - sLB)])
+
+    if m * (nn - n - m) > 0:
+        row2 = np.hstack([row2, np.zeros((m, nn - n - m))])
+
+    # row3 of A
+    if meq * (nn - n) > 0:
+        row3 = np.hstack([row3, np.zeros((meq, nn - n))])
+
+    # row4 of A
+    if lenB * m > 0:
+        row4 = np.hstack([row4, np.zeros((lenB, m))])
+
+    if not isempty(wUB):
+        row4 = np.hstack([row4, np.diag(wUB - wLB)])
+
+    if lenB * (nn - n - m - lenB) > 0:
+        row4 = np.hstack([row4, np.zeros((lenB, nn - n - m - lenB))])
+
+    A = np.array([])
+    if not isempty(row1):
+        A = row1
+
+    if not isempty(row2):
+        A = np.vstack([A, row2])
+
+    if not isempty(row3):
+        A = np.vstack([A, row3])
+
+    if not isempty(row4):
+        A = np.vstack([A, row4])
+
+    # ------------------------------
+    # Shift and scale x affects objs
+    # ------------------------------
+    cons = cons + 0.5 * (xLB.T @ H @ xLB) + f.T @ xLB;
+    f = f + H @ xLB
+
+    H = np.diag(xUB - xLB) @ H @ np.diag(xUB - xLB)
+    f = (xUB - xLB) * f
+    n0 = nn - n
+    f = np.hstack([f, np.zeros(n0)])
+    H = np.vstack([np.hstack([H, np.zeros((n, n0))]),
+                   np.hstack([np.zeros((n0, n)), np.zeros((n0, n0))])])
+
+    # track change: 6
+    sstruct['lb6'] = xLB
+    sstruct['ub6'] = xUB
+
+    L = np.zeros(nn)
+    U = np.ones(nn)
+    # ------------------------------
+    # Prep complementarity
+    # ------------------------------
+    E = np.zeros((nn, nn))
+
+    # s .* lambda = 0
+    n0 = n + m + lenB
+    for i in range(m):
+        E[n + i, n0 + i] = 1
+
+    # xL .* zL = 0
+    n0 = n0 + m + meq
+    for k in range(lenL):
+        i = idxL[k]
+        E[i, n0 + k] = 1
+
+    # xB .* zB = 0
+    n0 = nn - 2 * lenB
+    for k in range(lenB):
+        i = idxB[k]
+        E[i, n0 + k] = 1
+
+    # wB .* rB = 0
+    n00 = n + m
+    n0 = nn - lenB
+    for k in range(lenB):
+        E[n00 + k, n0 + k] = 1
+
+    # zB .* rB = 0
+    n00 = nn - 2 * lenB
+    for k in range(lenB):
+        E[n00 + k, n0 + k] = 1
+
+    E = E + E.T
+    sstruct['cmp1'] = np.concatenate([np.arange(n, m), idxL, idxB,
+                                      np.arange(n + m, lenB + m + n)], axis=0)
+    sstruct['cmp2'] = np.concatenate([np.arange(n + m + lenB, n + 2 * m + lenB),
+                                      np.arange(nn - 2 * lenB - lenL, nn - 2 * lenB),
+                                      np.arange(nn - 2 * lenB, nn - lenB),
+                                      np.arange(nn - lenB, nn)], axis=0)
+    sstruct['lenB'] = lenB
+    sstruct['m'] = m
+    sstruct['n'] = n
+    sstruct['lenL'] = lenL
+
+    return H, f, A, b, E, cons, L, U, sstruct
 
 
 def quadprogbb(H, f, LB, UB, options=None):
     """
-        This method use a solver implemented in matlab in
-            https://github.com/sburer/QuadProgBB
-            Authors: Samuel Burer
-        [x,fval,time,stat] = quadprogbb(H,f,A,b,Aeq,beq,LB,UB,options)
+    This method use a solver implemented in matlab in
+        https://github.com/sburer/QuadProgBB
+        Authors: Samuel Burer
 
-        QUADPROGBB globally solves the following nonconvex quadratic
-        programming problem:
+    [x,fval,time,stat] = quadprogbb(H,f,A,b,Aeq,beq,LB,UB,options)
 
-                min      1/2*x'*H*x + f'*x
-                s.t.       LB <= x <= UB
-
+    QUADPROGBB globally solves the following nonconvex quadratic
+    programming problem:
+            min      1/2*x'*H*x + f'*x
+            s.t.       LB <= x <= UB
     """
 
     options = dict({"cons": 0, 'tol': 1e-8})
@@ -955,7 +953,7 @@ def quadprogbb(H, f, LB, UB, options=None):
     #          [x*x']_E == 0
     # Bounds x <= 1 are valid
     # =========================================
-    standardform(H, f, A, b, Aeq, beq, LB, UB, options['cons'], options['tol'])
+    H, f, A, b, E, cons, L, U, sstruct = standardform(H, f, A, b, Aeq, beq, LB, UB, options['cons'], options['tol'])
 
 
 """
