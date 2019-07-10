@@ -1,52 +1,9 @@
 import numpy as np
 from .pymatlab import size, isempty, length, isfinite
+from .qpcplexopt import cvxlpbnd
 from .qphelpers import scale, shift
-from cvxopt import matrix, solvers
 from scipy.sparse import csr_matrix
 from sympy import Matrix
-
-
-def cvxlpbnd(c, A, lb, ub, lhs, rhs, solver=None):
-    def remove_inf(bounds, constraints):
-        """
-        remove bounds with -inf or inf,
-        cvxopt does not work with them
-        :param bounds: all bound of constraints
-        :param constraints: constraints matrix
-        :return: bound and constraints with bound inf or -inf
-        """
-        idx_inf = np.where(bounds == np.inf)
-        idx_minus_inf = np.where(bounds == -np.inf)
-        mask = np.ones(length(bounds), np.bool)
-        mask[idx_inf[0]] = 0
-        mask[idx_minus_inf[0]] = 0
-        return bounds[mask], constraints[mask]
-
-    def recovery_equal_constraints(bleft, bright, A):
-        idx_equals = np.where(bleft == bright)[0]
-        if idx_equals.size > 0:
-            mask = np.ones(length(bleft), np.bool)
-            mask[idx_equals] = 0
-            Aeq = matrix(A[~mask])
-            beq = matrix(bleft[~mask])
-            return bleft[mask], bright[mask], A[mask], Aeq, beq
-        return bleft, bright, A, matrix(), matrix()
-
-    d = size(c)
-    lhs, rhs, A, Aeq, beq = recovery_equal_constraints(lhs, rhs, A)
-    wrhs, wrA = remove_inf(rhs, A)
-    wlhs, wlA = remove_inf(-lhs, -A)
-    G_constraint = np.vstack([wrA, wlA])
-    h_constraint = np.hstack([wrhs, wlhs])
-
-    wub, wrI = remove_inf(ub, +np.eye(d))
-    wlb, wlI = remove_inf(-lb, -np.eye(d))
-    G_bound = np.vstack([wrI, wlI])
-    h_bound = np.hstack([wub, wlb])
-
-    G = matrix(np.vstack([G_constraint, G_bound]))
-    h = matrix(np.hstack([h_constraint, h_bound]))
-    return solvers.lp(matrix(c), G, h, A=Aeq, b=beq, solver=solver)  # solver="glpk") #  kktsolver='ldl',
 
 
 def cplex_bnd_solve(AA, bb, INDEQ, LB, UB, index, flag='b'):

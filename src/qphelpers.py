@@ -1,5 +1,6 @@
 import numpy as np
-from .pymatlab import isempty, length
+from .pymatlab import isempty, length, size
+from .qpcplexopt import cvxlpbnd
 
 
 def scale(H, f, A, Aeq, UB, idxU):
@@ -106,3 +107,38 @@ def getsol(x, sstruct):
         x = y
 
     return x
+
+
+def fixedAb(A, b, L, U):
+    tol = 1.0e-15
+    m, n = size(A, None)
+    local_A = A
+    local_b = b
+    I = np.where(abs(U - L) < tol)[0]
+
+    for i in range(length(I)):
+        j = I[i]
+        local_b = local_b - U[j] * local_A[:, j]
+        local_A[:, j] = np.zeros((m, 1))
+
+    tmp = np.eye(n)
+    tmp = tmp[I, :]
+    local_A = np.concatenate((local_A, tmp), axis=0)
+    local_b = np.concatenate((local_b, U[I]), axis=0)
+
+    return local_A, local_b
+
+
+def isfeasible(A, b, L, U):
+    m, n = size(A, None)
+    # cplexopts = cplexoptimset('Display', 'off');
+    # [x, tmp, exitflag, output] = cplexlp(zeros(n, 1), [], [], A, b, L, U, [], cplexopts);
+    # cvxlpbnd(c, A, lb, ub, lhs, rhs, Aeq=[], beq=[], solver=None):
+    solution = cvxlpbnd(np.zeros((n, 1)), np.array([]),  L, U, np.array([]), np.array([]),  A, b)
+    # solstat
+    if solution['status'] != 'optimal':
+        yes_or_no = False
+    else:
+        yes_or_no = True
+
+    return yes_or_no
